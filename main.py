@@ -10,6 +10,7 @@ Vape Shop Telegram Bot v9.2 — Python Edition
 + Дублирование заказов исправлено
 + Кол-во пользователей вместо статистики
 + Кэш подписки 5 мин + SQLite WAL
++ ИСПРАВЛЕНО: колонка photo_id в таблице products + миграция
 
 Установка: pip install python-telegram-bot
 Запуск: python bot.py
@@ -90,7 +91,23 @@ def init_db():
     c = conn.cursor()
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("PRAGMA synchronous=NORMAL")
-    c.execute("""CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, name TEXT, price INTEGER, description TEXT, category TEXT)""")
+
+    # ИСПРАВЛЕНО: добавлена колонка photo_id в CREATE TABLE
+    c.execute("""CREATE TABLE IF NOT EXISTS products (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        price INTEGER,
+        description TEXT,
+        category TEXT,
+        photo_id TEXT
+    )""")
+
+    # МИГРАЦИЯ: добавляем photo_id, если таблица создана без неё (старая база)
+    try:
+        c.execute("ALTER TABLE products ADD COLUMN photo_id TEXT")
+    except sqlite3.OperationalError:
+        pass  # колонка уже существует
+
     try:
         cols = c.execute("PRAGMA table_info(reviews)").fetchall()
         if cols and len(cols) != 6:
