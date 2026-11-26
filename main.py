@@ -34,11 +34,11 @@ if not TOKEN:
         "  • либо запустите: BOT_TOKEN=xxx python bot.py"
     )
 
-DB_PATH = "vape_shop.db"
+
 MAIN_ADMIN_ID = 6827569074
 REVIEW_CHANNEL_ID = -1004477314620
 REVIEW_CHANNEL_LINK = "https://t.me/jshsdjhe"
-DB_PATH=/app/data/bot.db
+DB_PATH = os.getenv("DB_PATH", "/app/data/bot.db")
 
 PAGE_SIZE = 10
 SUB_CACHE_TTL = 300       # 5 мин
