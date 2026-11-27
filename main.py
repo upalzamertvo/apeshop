@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Vape Shop Telegram Bot v10.2
+Vape Shop Telegram Bot v11.0 (с логами, бэкапами и статистикой)
 """
 
 import os
@@ -10,7 +10,9 @@ import sqlite3
 import logging
 import uuid
 import time
-from datetime import datetime, timezone
+import asyncio
+from datetime import datetime, timezone, time as dt_time
+import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -18,14 +20,22 @@ from telegram.ext import (
 )
 
 # ===== НАСТРОЙКИ =====
-# ВСТАВЬ СЮДА СВОЙ ТОКЕН, КОТОРЫЙ ПОЛУЧИШЬ В BOTFATHER (СТАРЫЙ ОТОЗВИ!)
+# ВСТАВЬ СЮДА СВОЙ ТОКЕН (старый отозви в BotFather)
 BOT_TOKEN = "9106749626:AAEPYFwdSZ5itAaHK1KY6gYqMLaedhS9Yao" 
 MAIN_ADMIN_ID = 6827569074
 REVIEW_CHANNEL_ID = -1004477314620
 REVIEW_CHANNEL_LINK = "https://t.me/jshsdjhe"
 
-# ЖЕЛЕЗНЫЙ ПУТЬ К БАЗЕ (НИКАКИХ os.getenv)
+# ЖЕЛЕЗНЫЙ ПУТЬ К БАЗЕ
 DB_PATH = "/app/data/bot.db"
+
+# ===== НАСТРОЙКИ ЛОГОВ (ЗАПОЛНИ СВОИМИ ID) =====
+LOG_GROUP_ID = -1001234567890 # <-- ID твоей лог-группы (с минусом)
+TOPIC_ORDERS = 2              # <-- ID темы "Заказы"
+TOPIC_SUPPORT = 3             # <-- ID темы "Поддержка"
+TOPIC_ERRORS = 4              # <-- ID темы "Ошибки"
+TOPIC_LOGS = 5                # <-- ID темы "Логи"
+TOPIC_BACKUPS = 6             # <-- ID темы "Бэкапы"
 
 PAGE_SIZE = 10
 SUB_CACHE_TTL = 300
@@ -100,16 +110,27 @@ def nav_row(prefix, page, total_pages):
         row.append(InlineKeyboardButton("➡️", callback_data=f"{prefix}:{page+1}"))
     return row
 
+async def send_log(context, topic_id, text):
+    if not LOG_GROUP_ID or LOG_GROUP_ID == -1001234567890: # Если не настроено - не спамим
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=LOG_GROUP_ID,
+            message_thread_id=topic_id,
+            text=text,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось отправить лог: {e}")
+
 # ===== База данных =====
 def get_db():
-    # check_same_thread=False нужен для Telegram-бота
     conn = sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
     try:
-        # Проверка на битый файл
         if os.path.exists(DB_PATH) and os.path.getsize(DB_PATH) > 0:
             try:
                 test_conn = get_db()
@@ -712,6 +733,7 @@ def admin_kb():
         [InlineKeyboardButton("📞 Поддержка", callback_data="admin_support"), InlineKeyboardButton("👥 Клиенты", callback_data="admin_users")],
         [InlineKeyboardButton("📣 Рассылка", callback_data="admin_broadcast"), InlineKeyboardButton("🔐 Админы", callback_data="admin_admins")],
         [InlineKeyboardButton("🔔 Подписки", callback_data="admin_channels")],
+        [InlineKeyboardButton("📖 Гайд для админа", callback_data="admin_guide")], # <-- Кнопка гайда
         [InlineKeyboardButton("⬅️ В меню", callback_data="menu")],
     ])
 
@@ -827,6 +849,9 @@ async def cmd_start(update, context):
         await update.message.reply_text("🔒 <b>Подпишитесь на канал</b> и нажмите «Проверить».", parse_mode="HTML", reply_markup=subscription_kb())
         return
     await update.message.reply_text(WELCOME, parse_mode="HTML", reply_markup=main_menu_kb())
+    
+    # Логируем вход нового пользователя
+    await send_log(context, TOPIC_LOGS, f"👋 Новый гость: {at_name(update.effective_user.username, update.effective_user.id)}")
 
 async def cmd_admin(update, context):
     store_user(update.effective_user)
@@ -857,6 +882,7 @@ async def handle_photo(update, context):
         data = state["data"]
         add_product_db(data["name"], data["price"], data["description"], data["category"], photo.file_id)
         await update.message.reply_text(f"✅ {data['name']} — {data['price']}₽", reply_markup=admin_kb())
+        await send_log(context, TOPIC_LOGS, f"📦 Админ добавил товар: {data['name']} ({data['price']}₽)")
         clear_state(user.id)
         return
     await update.message.reply_text("Используйте /admin")
@@ -882,6 +908,7 @@ async def handle_message(update, context):
             except Exception as e:
                 logger.warning(f"review channel: {e}")
             await update.message.reply_text("✅ Спасибо за отзыв!", reply_markup=main_menu_kb())
+            await send_log(context, TOPIC_LOGS, f"⭐ Клиент {at_name(username, user.id)} оставил отзыв с оценкой {data['rating']}/10")
         else:
             await update.message.reply_text("Вы уже оставляли отзыв по этому заказу.", reply_markup=main_menu_kb())
         clear_state(user.id)
@@ -917,6 +944,7 @@ async def handle_message(update, context):
             except Exception:
                 pass
         await update.message.reply_text("✅ Отправлено.", reply_markup=main_menu_kb())
+        await send_log(context, TOPIC_SUPPORT, f"📞 Вопрос от {at_name(username, user.id)}:\n{text}")
         clear_state(user.id)
         return
 
@@ -932,6 +960,7 @@ async def handle_message(update, context):
             except Exception:
                 pass
         await update.message.reply_text("✅ Предзаказ принят.", reply_markup=main_menu_kb())
+        await send_log(context, TOPIC_LOGS, f"📦 Новый предзаказ от {at_name(username, user.id)}: {text}")
         clear_state(user.id)
         return
 
@@ -965,6 +994,7 @@ async def handle_message(update, context):
             except Exception:
                 pass
         await update.message.reply_text(f"✅ Заказ №{order_id} оформлен.\n\n📍 {text}\n\nАдмин свяжется с вами.", reply_markup=main_menu_kb())
+        await send_log(context, TOPIC_ORDERS, f"🛍 <b>Новый заказ #{order_id}</b>\n👤 Клиент: {at_name(username, user.id)}\n📍 Место: {text}\n💰 Сумма: {total}₽")
         clear_cart(user.id)
         return
 
@@ -996,6 +1026,7 @@ async def handle_admin_message(update, context):
             except Exception:
                 failed += 1
         await update.message.reply_text(f"📣 Готово.\n✅ {sent}  ❌ {failed}", reply_markup=admin_kb())
+        await send_log(context, TOPIC_LOGS, f"📣 Рассылка завершена. Отправлено: {sent}, Ошибок: {failed}")
         clear_state(user_id)
         return
 
@@ -1026,6 +1057,7 @@ async def handle_admin_message(update, context):
             data = state["data"]
             add_product_db(data["name"], data["price"], data["description"], data["category"], None)
             await update.message.reply_text(f"✅ {data['name']} — {data['price']}₽", reply_markup=admin_kb())
+            await send_log(context, TOPIC_LOGS, f"📦 Админ добавил товар: {data['name']} ({data['price']}₽)")
             clear_state(user_id)
         else:
             await update.message.reply_text("📷 Отправьте фото или «-»:")
@@ -1138,6 +1170,7 @@ async def _handle_callback_inner(update, context, query, answer):
             return
         update_order_status(order_id, "completed")
         await query.edit_message_text("🎉 Спасибо за подтверждение!\n\nОцените сервис от 1 до 10:", reply_markup=rating_kb(order_id))
+        await send_log(context, TOPIC_LOGS, f"🎉 Клиент {at_name(username, user_id)} подтвердил заказ #{order_id}. Сделка закрыта.")
         return
 
     if data.startswith("rate:"):
@@ -1171,6 +1204,7 @@ async def _handle_callback_inner(update, context, query, answer):
             except Exception:
                 pass
         await context.bot.send_message(chat_id, "Админ уведомлён.", reply_markup=main_menu_kb())
+        await send_log(context, TOPIC_LOGS, f"❌ Клиент {at_name(username, user_id)} отказался от заказа #{order_id}.")
         return
 
     if not admin:
@@ -1305,6 +1339,24 @@ async def _handle_callback_inner(update, context, query, answer):
     if data == "admin":
         await edit_or_replace(query, context, chat_id, admin_panel_text(), admin_kb())
         return
+    if data == "admin_guide":
+        guide_text = (
+            "📖 <b>ГАЙД ДЛЯ ПРОДАВЦА (АДМИНА)</b>\n\n"
+            "Вот пошаговая инструкция, как проходят сделки:\n\n"
+            "1️⃣ <b>Клиент делает заказ.</b>\n"
+            "В боте он собирает корзину, нажимает «Оформить заказ» и пишет место и время встречи. Бот сразу пришлёт вам уведомление об этом.\n\n"
+            "2️⃣ <b>Вы пишете клиенту.</b>\n"
+            "В уведомлении о заказе есть кнопка «💬 Написать». Нажимаете её, и бот пересылает ваше сообщение клиенту. Уточняете детали (какой вкус, цвет, есть ли в наличии).\n\n"
+            "3️⃣ <b>Встреча.</b>\n"
+            "Вы встречаетесь, клиент отдаёт деньги, вы отдаёте товар.\n\n"
+            "4️⃣ <b>Вы подтверждаете заказ.</b>\n"
+            "После встречи зайдите в бота → «📋 Заказы» → выберите заказ → нажмите «✅ Подтвердить». Клиенту придёт уведомление «Получили?».\n\n"
+            "5️⃣ <b>Клиент подтверждает.</b>\n"
+            "Когда он нажмёт «✅ Да, получил», заказ перейдёт в статус «Выполнен», а бот попросит его оставить отзыв (можно прикрепить фото).\n\n"
+            "⚠️ <b>Важно:</b> Статус «Выполнен» ставится только после того, как оба нажали «Подтвердить»."
+        )
+        await edit_or_replace(query, context, chat_id, guide_text, admin_kb())
+        return
     if data == "admin_add":
         await edit_or_replace(query, context, chat_id, "➕ Категория:", admin_add_cat_kb())
         return
@@ -1332,6 +1384,7 @@ async def _handle_callback_inner(update, context, query, answer):
             return
         delete_product_db(category, pid)
         await answer(f"🗑 «{product['name']}» удалён")
+        await send_log(context, TOPIC_LOGS, f"🗑 Админ удалил товар: {product['name']}")
         products = get_products(category)
         if not products:
             await edit_or_replace(query, context, chat_id, f"{CATEGORY_EMOJI[category]} Пусто.", admin_del_cat_kb())
@@ -1536,6 +1589,53 @@ async def show_user_profile(context, chat_id, message_id, target_uid):
     except Exception:
         await context.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=user_profile_kb(target_uid))
 
+# ===== Фоновые задачи =====
+async def backup_job(context):
+    try:
+        with open(DB_PATH, 'rb') as f:
+            await context.bot.send_document(
+                chat_id=LOG_GROUP_ID,
+                message_thread_id=TOPIC_BACKUPS,
+                document=f,
+                filename="bot.db",
+                caption="🗄 <b>Автобэкап базы данных</b>\nБаза сохранена и готова к восстановлению.",
+                parse_mode="HTML"
+            )
+        await send_log(context, TOPIC_LOGS, "✅ Автобэкап успешно сохранён в топик «Бэкапы».")
+    except Exception as e:
+        logger.error(f"Ошибка автобэкапа: {e}")
+        await send_log(context, TOPIC_ERRORS, f"❌ <b>Ошибка автобэкапа:</b>\n<code>{e}</code>")
+
+async def daily_stats_job(context):
+    try:
+        conn = get_db()
+        today = datetime.now(pytz.timezone('Europe/Moscow')).strftime('%Y-%m-%d')
+        
+        orders_today = conn.execute("SELECT COUNT(*), SUM(total_price) FROM orders WHERE DATE(created_at) = ?", (today,)).fetchone()
+        users_today = conn.execute("SELECT COUNT(*) FROM users WHERE DATE(first_seen) = ?", (today,)).fetchone()[0]
+        total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        pending = conn.execute("SELECT COUNT(*) FROM orders WHERE status = 'pending'").fetchone()[0]
+        completed_today = conn.execute("SELECT COUNT(*) FROM orders WHERE status = 'completed' AND DATE(created_at) = ?", (today,)).fetchone()[0]
+        conn.close()
+
+        count_orders = orders_today[0] or 0
+        sum_orders = orders_today[1] or 0
+
+        text = (
+            f"📊 <b>ИТОГИ ДНЯ ({today})</b>\n\n"
+            f"👥 <b>Клиенты:</b>\n"
+            f"  • Новых за сегодня: <b>+{users_today}</b>\n"
+            f"  • Всего в базе: <b>{total_users}</b>\n\n"
+            f"🛒 <b>Заказы:</b>\n"
+            f"  • Новых за сегодня: <b>{count_orders}</b> на сумму <b>{sum_orders}₽</b>\n"
+            f"  • Успешно выдано: <b>{completed_today}</b>\n"
+            f"  • Ждут выдачи: <b>{pending}</b>\n\n"
+            f"💰 <b>Выручка за сегодня: {sum_orders}₽</b>"
+        )
+        await context.bot.send_message(chat_id=LOG_GROUP_ID, message_thread_id=TOPIC_LOGS, text=text, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Ошибка статистики: {e}")
+
 # ===== Error handler =====
 async def error_handler(update, context):
     logger.error("Exception:", exc_info=context.error)
@@ -1543,6 +1643,7 @@ async def error_handler(update, context):
     now = time.time()
     if MAIN_ADMIN_ID and (now - _last_error_notify.get(err_type, 0)) > 60:
         _last_error_notify[err_type] = now
+        await send_log(context, TOPIC_ERRORS, f"🚨 <b>Ошибка в боте!</b>\nТип: <code>{err_type}</code>\nТекст: <code>{str(context.error)[:500]}</code>")
         try:
             await context.bot.send_message(MAIN_ADMIN_ID, f"⚠️ Ошибка: {err_type}\n{str(context.error)[:200]}")
         except Exception:
@@ -1559,6 +1660,12 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
+    
+    # Таймеры
+    job_queue = app.job_queue
+    job_queue.run_repeating(backup_job, interval=43200, first=10) # Бэкап каждые 12 часов
+    job_queue.run_daily(daily_stats_job, time=dt_time(hour=21, minute=0, tzinfo=pytz.timezone('Europe/Moscow'))) # Статистика в 21:00 МСК
+    
     logger.info("Бот запускается...")
     app.run_polling()
 
